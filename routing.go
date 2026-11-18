@@ -13,14 +13,12 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p-kad-dht/internal"
 	internalConfig "github.com/libp2p/go-libp2p-kad-dht/internal/config"
 	"github.com/libp2p/go-libp2p-kad-dht/netsize"
 	"github.com/libp2p/go-libp2p-kad-dht/qpeerset"
 	kb "github.com/libp2p/go-libp2p-kbucket"
 	record "github.com/libp2p/go-libp2p-record"
-	"github.com/multiformats/go-multihash"
 )
 
 // This file implements the Routing interface for the IpfsDHT struct.
@@ -291,12 +289,22 @@ func (dht *IpfsDHT) getValues(ctx context.Context, key string, stopQuery chan st
 	logger.Debugw("finding value", "key", internal.LoggableRecordKeyString(key))
 
 	if rec, err := dht.getLocal(ctx, key); rec != nil && err == nil {
-		select {
-		case valCh <- recvdVal{
-			Val:  rec.GetValue(),
-			From: dht.self,
-		}:
-		case <-ctx.Done():
+		// The value store only age-checks records on read; run the validator so
+		// the local record enters the search under the same rules as records
+		// received from the network (getValues discards those on Validate
+		// failure below). Without this check, a locally stored record that has
+		// since expired by the validator's rules (e.g. IPNS EOL) would be
+		// emitted to SearchValue callers as if valid.
+		if err := dht.Validator.Validate(key, rec.GetValue()); err != nil {
+			logger.Debugw("local record verify failed", "key", internal.LoggableRecordKeyString(key), "error", err)
+		} else {
+			select {
+			case valCh <- recvdVal{
+				Val:  rec.GetValue(),
+				From: dht.self,
+			}:
+			case <-ctx.Done():
+			}
 		}
 	}
 
